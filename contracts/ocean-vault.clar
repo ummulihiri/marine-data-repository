@@ -109,10 +109,6 @@
 ;; Private functions
 ;; ============================================
 
-;; Validates that the caller is a registered researcher
-(define-private (is-registered-researcher)
-  (default-to false (map-get? researchers { researcher-id: tx-sender }))
-)
 
 ;; Validates the access type
 (define-private (is-valid-access-type (access-type uint))
@@ -120,27 +116,6 @@
     (is-eq access-type ACCESS-TYPE-OPEN)
     (is-eq access-type ACCESS-TYPE-PAID)
     (is-eq access-type ACCESS-TYPE-PERMISSIONED)
-  )
-)
-
-;; Check if a user has access to a specific dataset
-(define-private (has-dataset-access (dataset-id (string-ascii 36)) (user principal))
-  (let ((dataset (map-get? datasets { dataset-id: dataset-id })))
-    (match dataset
-      dataset-info
-      (if (is-eq (get access-type dataset-info) ACCESS-TYPE-OPEN)
-        true
-        (if (is-eq (get researcher-id dataset-info) user)
-          true
-          (default-to 
-            false
-            (get has-access (default-to { has-access: false, granted-at: u0, granted-by: tx-sender }
-              (map-get? dataset-permissions { dataset-id: dataset-id, user: user })))
-          )
-        )
-      )
-      false
-    )
   )
 )
 
@@ -156,14 +131,6 @@
 ;; Get dataset information
 (define-read-only (get-dataset (dataset-id (string-ascii 36)))
   (map-get? datasets { dataset-id: dataset-id })
-)
-
-;; Check if user has access to dataset
-(define-read-only (check-dataset-access (dataset-id (string-ascii 36)) (user principal))
-  (if (has-dataset-access dataset-id user)
-    (ok true)
-    (err ERR-ACCESS-DENIED)
-  )
 )
 
 ;; Get access permission details
@@ -190,77 +157,7 @@
 ;; Public functions
 ;; ============================================
 
-;; Register a new researcher
-(define-public (register-researcher (name (string-ascii 100)) (institution (string-ascii 100)) (credentials (string-ascii 255)))
-  (let ((researcher-exists (is-registered-researcher)))
-    (asserts! (not researcher-exists) ERR-ALREADY-REGISTERED)
-    
-    (map-set researchers
-      { researcher-id: tx-sender }
-      {
-        name: name,
-        institution: institution,
-        credentials: credentials,
-        registration-time: block-height,
-        dataset-count: u0
-      }
-    )
-    (ok true)
-  )
-)
 
-;; Register a new dataset
-(define-public (register-dataset 
-  (dataset-id (string-ascii 36))
-  (title (string-ascii 100))
-  (data-type (string-ascii 50))
-  (location (string-ascii 100))
-  (date-collected uint)
-  (methodology (string-ascii 255))
-  (data-hash (buff 32))
-  (access-type uint)
-  (access-price uint)
-)
-  (let (
-    (researcher-info (get-researcher tx-sender))
-    (dataset-exists (map-get? datasets { dataset-id: dataset-id }))
-  )
-    ;; Validate inputs
-    (asserts! (not (is-none researcher-info)) ERR-UNKNOWN-RESEARCHER)
-    (asserts! (not dataset-exists) ERR-ALREADY-REGISTERED)
-    (asserts! (is-valid-access-type access-type) ERR-INVALID-ACCESS-TYPE)
-    (asserts! (or (not (is-eq access-type ACCESS-TYPE-PAID)) (> access-price u0)) ERR-INVALID-PARAMETERS)
-    
-    ;; Register the dataset
-    (map-set datasets
-      { dataset-id: dataset-id }
-      {
-        title: title,
-        data-type: data-type,
-        location: location,
-        date-collected: date-collected,
-        methodology: methodology,
-        data-hash: data-hash,
-        researcher-id: tx-sender,
-        access-type: access-type,
-        access-price: access-price,
-        citation-count: u0,
-        registered-at: block-height,
-        verified: false
-      }
-    )
-    
-    ;; Update researcher dataset count
-    (map-set researchers
-      { researcher-id: tx-sender }
-      (merge (unwrap! researcher-info ERR-UNKNOWN-RESEARCHER)
-        { dataset-count: (+ (get dataset-count (unwrap! researcher-info ERR-UNKNOWN-RESEARCHER)) u1) }
-      )
-    )
-    
-    (ok true)
-  )
-)
 
 ;; Verify a dataset (can only be done by contract owner for now, could be extended to a verification committee)
 (define-public (verify-dataset (dataset-id (string-ascii 36)))
@@ -338,41 +235,6 @@
   )
 )
 
-;; Cite a dataset in a research work
-(define-public (cite-dataset (dataset-id (string-ascii 36)) (citation-context (string-ascii 255)))
-  (let (
-    (dataset (map-get? datasets { dataset-id: dataset-id }))
-    (researcher-info (get-researcher tx-sender))
-    (existing-citation (map-get? dataset-citations { dataset-id: dataset-id, citing-researcher: tx-sender }))
-  )
-    ;; Validate inputs
-    (asserts! (not (is-none dataset)) ERR-UNKNOWN-DATASET)
-    (asserts! (not (is-none researcher-info)) ERR-UNKNOWN-RESEARCHER)
-    (asserts! (has-dataset-access dataset-id tx-sender) ERR-ACCESS-DENIED)
-    
-    ;; Record the citation
-    (map-set dataset-citations
-      { dataset-id: dataset-id, citing-researcher: tx-sender }
-      {
-        citation-time: block-height,
-        citation-context: citation-context
-      }
-    )
-    
-    ;; Update citation count if this is a new citation
-    (if (is-none existing-citation)
-      (map-set datasets
-        { dataset-id: dataset-id }
-        (merge (unwrap! dataset ERR-UNKNOWN-DATASET)
-          { citation-count: (+ (get citation-count (unwrap! dataset ERR-UNKNOWN-DATASET)) u1) }
-        )
-      )
-      true
-    )
-    
-    (ok true)
-  )
-)
 
 ;; Create a governance proposal
 (define-public (create-proposal (title (string-ascii 100)) (description (string-ascii 500)) (voting-duration uint))
@@ -402,45 +264,6 @@
     (var-set next-proposal-id (+ proposal-id u1))
     
     (ok proposal-id)
-  )
-)
-
-;; Vote on a governance proposal
-(define-public (vote-on-proposal (proposal-id uint) (vote bool))
-  (let (
-    (proposal (map-get? governance-proposals { proposal-id: proposal-id }))
-    (researcher-info (get-researcher tx-sender))
-    (already-voted (map-get? proposal-votes { proposal-id: proposal-id, voter: tx-sender }))
-  )
-    ;; Validate inputs
-    (asserts! (not (is-none proposal)) ERR-INVALID-PARAMETERS)
-    (asserts! (not (is-none researcher-info)) ERR-UNKNOWN-RESEARCHER)
-    (asserts! (is-none already-voted) ERR-ALREADY-VOTED)
-    
-    (let ((proposal-info (unwrap! proposal ERR-INVALID-PARAMETERS)))
-      ;; Ensure proposal is still active
-      (asserts! (is-eq (get status proposal-info) "active") ERR-NO-ACTIVE-VOTE)
-      (asserts! (<= block-height (get voting-ends-at proposal-info)) ERR-NO-ACTIVE-VOTE)
-      
-      ;; Record the vote
-      (map-set proposal-votes
-        { proposal-id: proposal-id, voter: tx-sender }
-        { vote: vote }
-      )
-      
-      ;; Update vote counts
-      (map-set governance-proposals
-        { proposal-id: proposal-id }
-        (merge proposal-info
-          (if vote
-            { yes-votes: (+ (get yes-votes proposal-info) u1) }
-            { no-votes: (+ (get no-votes proposal-info) u1) }
-          )
-        )
-      )
-      
-      (ok true)
-    )
   )
 )
 
